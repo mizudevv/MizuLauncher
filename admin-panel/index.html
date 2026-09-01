@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MizuLauncher • Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="./config.js"></script>
+  <style>
+    body { background: #090909; color: #f5f5f5; }
+    .panel { background: #121212; border: 1px solid #242424; }
+    .muted { color: #888; }
+    .danger { color: #ff7c7c; }
+    .ok { color: #7df2a1; }
+    .glass { background: rgba(18,18,18,.86); backdrop-filter: blur(16px); }
+    .table-scroll { scrollbar-width: thin; scrollbar-color: #333 transparent; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div id="app" class="min-h-screen"></div>
+
+<script>
+const cfg = window.MIZU_CONFIG || {};
+const root = document.getElementById('app');
+let supabaseClient = null;
+let session = null;
+let players = [];
+
+function esc(v) {
+  return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+function toast(message, good=false) {
+  const el = document.createElement('div');
+  el.className = 'fixed bottom-5 right-5 z-50 panel rounded-2xl px-5 py-4 shadow-2xl';
+  el.innerHTML = `<div class="text-sm ${good ? 'ok' : 'danger'}">${esc(message)}</div>`;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3600);
+}
+function renderLogin() {
+  root.innerHTML = `
+    <main class="min-h-screen grid place-items-center p-6">
+      <section class="panel w-full max-w-md rounded-3xl p-8 shadow-2xl">
+        <div class="text-xs uppercase tracking-[.3em] muted mb-3">MIZULAUNCHER</div>
+        <h1 class="text-3xl font-black">Panel administratora</h1>
+        <p class="muted mt-2 text-sm">Zaloguj się kontem oznaczonym jako administrator w Supabase.</p>
+        <form id="loginForm" class="mt-7 space-y-4">
+          <input id="email" type="email" required placeholder="Email" class="w-full rounded-xl bg-black border border-[#2a2a2a] px-4 py-3 outline-none focus:border-white" />
+          <input id="password" type="password" required placeholder="Hasło" class="w-full rounded-xl bg-black border border-[#2a2a2a] px-4 py-3 outline-none focus:border-white" />
+          <button class="w-full rounded-xl bg-white text-black font-bold py-3 hover:bg-zinc-200">Zaloguj</button>
+        </form>
+      </section>
+    </main>`;
+  document.getElementById('loginForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = document.getElementById('email').value.trim();
+    const password = document.getElementById('password').value;
+    const {data, error} = await supabaseClient.auth.signInWithPassword({email, password});
+    if (error) { toast(error.message); return; }
+    session = data.session;
+    await bootAdmin();
+  });
+}
+
+function renderApp() {
+  root.innerHTML = `
+  <div class="min-h-screen">
+    <header class="glass border-b border-[#242424] sticky top-0 z-20">
+      <div class="max-w-[1500px] mx-auto px-6 py-4 flex items-center justify-between">
+        <div><div class="text-xs uppercase tracking-[.3em] muted">MIZULAUNCHER</div><div class="text-xl font-black">Admin Control</div></div>
+        <div class="flex items-center gap-3">
+          <div id="me" class="text-sm muted"></div>
+          <button id="logout" class="rounded-lg border border-[#2a2a2a] px-4 py-2 text-sm hover:bg-[#1b1b1b]">Wyloguj</button>
+        </div>
+      </div>
+    </header>
+    <main class="max-w-[1500px] mx-auto p-6 space-y-6">
+      <section id="stats" class="grid md:grid-cols-4 gap-4"></section>
+      <section class="panel rounded-3xl overflow-hidden">
+        <div class="p-5 border-b border-[#242424] flex items-center justify-between gap-4">
+          <div><h2 class="text-lg font-bold">Gracze</h2><p class="muted text-sm">Statusy są zapisywane natychmiast w Supabase.</p></div>
+          <button id="refresh" class="rounded-xl border border-[#2a2a2a] px-4 py-2 hover:bg-[#1b1b1b]">Odśwież</button>
+        </div>
+        <div class="overflow-auto table-scroll">
+          <table class="min-w-[1250px] w-full text-sm">
+            <thead class="bg-[#0d0d0d] text-left muted"><tr>
+              <th class="px-4 py-3">Konto</th><th class="px-4 py-3">Windows</th><th class="px-4 py-3">IP</th>
+              <th class="px-4 py-3">Ostatnia aktywność</th><th class="px-4 py-3">Role</th><th class="px-4 py-3">Gra</th><th class="px-4 py-3">Pobieranie</th><th class="px-4 py-3">Kill-Switch</th>
+            </tr></thead>
+            <tbody id="playersBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>`;
+  document.getElementById('logout').onclick = async () => { await supabaseClient.auth.signOut(); session=null; renderLogin(); };
+  document.getElementById('refresh').onclick = loadPlayers;
+}
+
+function dateText(v) { return v ? new Date(v).toLocaleString('pl-PL') : '—'; }
+function statusPill(on, yes='TAK', no='NIE') {
+  return `<span class="inline-flex rounded-full px-2.5 py-1 text-xs ${on ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}">${on ? yes : no}</span>`;
+}
+function renderStats() {
+  const total = players.length;
+  const canPlay = players.filter(p=>p.can_play).length;
+  const canDownload = players.filter(p=>p.can_download).length;
+  const blocked = players.filter(p=>p.kill_switch).length;
+  document.getElementById('stats').innerHTML = [
+    ['Gracze', total], ['Mogą grać', canPlay], ['Mogą pobierać', canDownload], ['Kill-Switch', blocked]
+  ].map(([a,b])=>`<div class="panel rounded-2xl p-5"><div class="muted text-xs uppercase tracking-widest">${a}</div><div class="text-3xl font-black mt-2">${b}</div></div>`).join('');
+}
+
+async function loadPlayers() {
+  const {data, error} = await supabaseClient.from('player_control').select('user_id,email,windows_username,ip_address,last_login_at,last_seen_at,is_developer,is_admin,can_play,can_download,kill_switch,updated_at,hwid_hash').order('last_seen_at', {ascending:false, nullsFirst:false});
+  if (error) { toast(error.message); return; }
+  players = data || [];
+  renderStats();
+  const body = document.getElementById('playersBody');
+  body.innerHTML = players.map(p => `
+    <tr class="border-t border-[#202020] align-top">
+      <td class="px-4 py-4"><div class="font-semibold">${esc(p.email || p.user_id)}</div><div class="muted text-xs mt-1">${esc(p.user_id)}</div></td>
+      <td class="px-4 py-4">${esc(p.windows_username || '—')}</td>
+      <td class="px-4 py-4 font-mono text-xs">${esc(p.ip_address || '—')}</td>
+      <td class="px-4 py-4"><div>${dateText(p.last_seen_at)}</div><div class="muted text-xs">login: ${dateText(p.last_login_at)}</div></td>
+      <td class="px-4 py-4 space-x-1">${p.is_admin?statusPill(true,'ADMIN'):''}${p.is_developer?statusPill(true,'DEV'):''}</td>
+      <td class="px-4 py-4"><button data-a="play" data-id="${esc(p.user_id)}" data-value="${!p.can_play}" class="rounded-lg border border-[#2a2a2a] px-3 py-2 hover:bg-[#1b1b1b]">${p.can_play?'Zablokuj Granie':'Odblokuj Granie'}</button></td>
+      <td class="px-4 py-4"><button data-a="download" data-id="${esc(p.user_id)}" data-value="${!p.can_download}" class="rounded-lg border border-[#2a2a2a] px-3 py-2 hover:bg-[#1b1b1b]">${p.can_download?'Zablokuj Pobieranie':'Odblokuj Pobieranie'}</button></td>
+      <td class="px-4 py-4"><button data-a="kill_switch" data-id="${esc(p.user_id)}" data-value="${!p.kill_switch}" class="rounded-lg ${p.kill_switch?'bg-red-500/15 text-red-300':'border border-[#2a2a2a]'} px-3 py-2 hover:bg-[#1b1b1b]">${p.kill_switch?'Wyłącz Kill-Switch':'Zatrzymaj Aplikację'}</button></td>
+    </tr>`).join('');
+  body.querySelectorAll('button[data-a]').forEach(btn => btn.addEventListener('click', () => changeStatus(btn.dataset.a, btn.dataset.id, btn.dataset.value === 'true')));
+}
+
+async function changeStatus(action, target, value) {
+  if (!confirm(value ? 'Wykonać tę blokadę?' : 'Przywrócić ten status?')) return;
+  const {data, error} = await supabaseClient.functions.invoke('mizu-admin-action', {body:{action, target_user_id:target, value}});
+  if (error) { toast(error.message); return; }
+  if (data?.ok === false) { toast(data.error || 'Akcja odrzucona'); return; }
+  toast('Status zapisany.', true);
+  await loadPlayers();
+}
+
+async function bootAdmin() {
+  const {data, error} = await supabaseClient.from('player_control').select('is_admin,email').eq('user_id', session.user.id).single();
+  if (error || !data?.is_admin) {
+    await supabaseClient.auth.signOut();
+    toast('To konto nie ma uprawnień administratora.');
+    renderLogin();
+    return;
+  }
+  renderApp();
+  document.getElementById('me').textContent = data.email || session.user.email || '';
+  await loadPlayers();
+}
+
+async function init() {
+  if (!cfg.SUPABASE_URL || cfg.SUPABASE_URL.includes('YOUR_') || !cfg.SUPABASE_PUBLISHABLE_KEY || cfg.SUPABASE_PUBLISHABLE_KEY.includes('YOUR_')) {
+    root.innerHTML = `<div class="min-h-screen grid place-items-center p-6"><section class="panel max-w-2xl rounded-3xl p-8"><h1 class="text-2xl font-black">Brak konfiguracji</h1><p class="muted mt-2">Skopiuj config.example.js do config.js i wpisz Supabase Project URL oraz Publishable Key.</p></section></div>`;
+    return;
+  }
+  supabaseClient = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_PUBLISHABLE_KEY, {auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+  const {data} = await supabaseClient.auth.getSession();
+  session = data.session;
+  if (!session) { renderLogin(); return; }
+  await bootAdmin();
+}
+init();
+</script>
+</body>
+</html>

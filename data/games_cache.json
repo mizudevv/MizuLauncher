@@ -1,0 +1,28 @@
+[
+  {
+    "id": "c083b300e0b1",
+    "name": "Ciastek Simulator",
+    "version": "0.0.2",
+    "description": "Ciastek simulator (not supporting) (game for fun)",
+    "download_url": "https://gofile.io/d/ghEQhBQI",
+    "executable": "Ciastek 0.0.2v\\Ciastko Simulator.exe",
+    "install_folder": "",
+    "arguments": "",
+    "icon_url": "https://i.ibb.co/GjpKTLn/ciastekv3.png",
+    "banner_url": "https://i.ibb.co/5xJr3nwN/ciastekv2.png",
+    "category": "Simulator",
+    "tags": [
+      "Simulator",
+      "4Fun",
+      "Poland"
+    ],
+    "featured": false,
+    "enabled": true,
+    "developer": "Mizu",
+    "size_mb": 52.7,
+    "release_date": "2026-08-16T21:07:04.745276+00:00",
+    "updated_at": "2026-08-16T21:32:43.462105+00:00",
+    "homepage_url": "https://mizudev-tt.itch.io/ciastek-simulator",
+    "notes": "Not supporting and game for fun\n\nby MizuDEV"
+  }
+]

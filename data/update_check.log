@@ -1,0 +1,38 @@
+[2026-08-20T13:24:59] STARTUP GATE current=0.0.5
+[2026-08-20T13:24:59] CHECK url=https://ttyunqjbikrfnabrthva.supabase.co/rest/v1/launcher_updates current=0.0.5 update_id=1
+[2026-08-20T13:25:00] HTTP 200 payload=[{'latest_version': '0.0.6', 'download_url': 'https://TWOJ-LINK-DO-NOWEGO-EXE', 'message': 'Dostępna jest nowa wersja MizuLaunchera 1.1.0.', 'enabled': True}]
+[2026-08-20T13:25:00] RESULT enabled=True latest=0.0.6 current=0.0.5 available=True
+[2026-08-20T13:25:00] UPDATE REQUIRED current=0.0.5 latest=0.0.6 url='https://TWOJ-LINK-DO-NOWEGO-EXE'
+[2026-08-20T13:25:05] OPEN UPDATE URL https://TWOJ-LINK-DO-NOWEGO-EXE
+[2026-08-20T13:26:49] STARTUP GATE current=0.0.5
+[2026-08-20T13:26:49] CHECK url=https://ttyunqjbikrfnabrthva.supabase.co/rest/v1/launcher_updates current=0.0.5 update_id=1
+[2026-08-20T13:26:49] HTTP 200 payload=[{'latest_version': '0.0.6', 'download_url': 'https://TWOJ-LINK-DO-NOWEGO-EXE', 'message': 'Dostępna jest nowa wersja MizuLaunchera 0.0.6.', 'enabled': True}]
+[2026-08-20T13:26:49] RESULT enabled=True latest=0.0.6 current=0.0.5 available=True
+[2026-08-20T13:26:49] UPDATE REQUIRED current=0.0.5 latest=0.0.6 url='https://TWOJ-LINK-DO-NOWEGO-EXE'
+[2026-08-20T13:26:53] OPEN UPDATE URL https://TWOJ-LINK-DO-NOWEGO-EXE
+[2026-08-20T13:26:59] STARTUP GATE current=0.0.5
+[2026-08-20T13:26:59] CHECK url=https://ttyunqjbikrfnabrthva.supabase.co/rest/v1/launcher_updates current=0.0.5 update_id=1
+[2026-08-20T13:26:59] HTTP 200 payload=[{'latest_version': '0.0.6', 'download_url': 'https://TWOJ-LINK-DO-NOWEGO-EXE', 'message': 'Dostępna jest nowa wersja MizuLaunchera 0.0.6.', 'enabled': True}]
+[2026-08-20T13:26:59] RESULT enabled=True latest=0.0.6 current=0.0.5 available=True
+[2026-08-20T13:26:59] UPDATE REQUIRED current=0.0.5 latest=0.0.6 url='https://TWOJ-LINK-DO-NOWEGO-EXE'
+[2026-08-20T13:27:01] OPEN UPDATE URL https://TWOJ-LINK-DO-NOWEGO-EXE
+[2026-08-20T13:27:12] STARTUP GATE current=0.0.5
+[2026-08-20T13:27:12] CHECK url=https://ttyunqjbikrfnabrthva.supabase.co/rest/v1/launcher_updates current=0.0.5 update_id=1
+[2026-08-20T13:27:12] HTTP 200 payload=[{'latest_version': '0.0.5', 'download_url': 'https://TWOJ-LINK-DO-NOWEGO-EXE', 'message': 'Dostępna jest nowa wersja MizuLaunchera 0.0.5', 'enabled': True}]
+[2026-08-20T13:27:12] RESULT enabled=True latest=0.0.5 current=0.0.5 available=False
+[2026-08-20T13:27:12] UP_TO_DATE current=0.0.5 latest=0.0.5
+[2026-08-20T20:23:49] STARTUP GATE current=0.0.5
+[2026-08-20T20:23:49] CHECK url=https://ttyunqjbikrfnabrthva.supabase.co/rest/v1/launcher_updates current=0.0.5 update_id=1
+[2026-08-20T20:23:49] HTTP 200 payload=[{'latest_version': '0.0.5', 'download_url': 'https://TWOJ-LINK-DO-NOWEGO-EXE', 'message': 'Dostępna jest nowa wersja MizuLaunchera 0.0.5', 'enabled': True}]
+[2026-08-20T20:23:49] RESULT enabled=True latest=0.0.5 current=0.0.5 available=False
+[2026-08-20T20:23:49] UP_TO_DATE current=0.0.5 latest=0.0.5
+[2026-08-21T00:06:36] STARTUP GATE current=0.0.5
+[2026-08-21T00:06:36] CHECK url=https://ttyunqjbikrfnabrthva.supabase.co/rest/v1/launcher_updates current=0.0.5 update_id=1
+[2026-08-21T00:06:37] HTTP 200 payload=[{'latest_version': '0.0.5', 'download_url': 'https://TWOJ-LINK-DO-NOWEGO-EXE', 'message': 'Dostępna jest nowa wersja MizuLaunchera 0.0.5', 'enabled': True}]
+[2026-08-21T00:06:37] RESULT enabled=True latest=0.0.5 current=0.0.5 available=False
+[2026-08-21T00:06:37] UP_TO_DATE current=0.0.5 latest=0.0.5
+[2026-08-21T00:08:05] STARTUP GATE current=0.0.5
+[2026-08-21T00:08:05] CHECK url=https://ttyunqjbikrfnabrthva.supabase.co/rest/v1/launcher_updates current=0.0.5 update_id=1
+[2026-08-21T00:08:05] HTTP 200 payload=[{'latest_version': '0.0.5', 'download_url': 'https://TWOJ-LINK-DO-NOWEGO-EXE', 'message': 'Dostępna jest nowa wersja MizuLaunchera 0.0.5', 'enabled': True}]
+[2026-08-21T00:08:05] RESULT enabled=True latest=0.0.5 current=0.0.5 available=False
+[2026-08-21T00:08:05] UP_TO_DATE current=0.0.5 latest=0.0.5

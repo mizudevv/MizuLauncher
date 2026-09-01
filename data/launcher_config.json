@@ -1,0 +1,17 @@
+{
+  "supabase_url": "",
+  "supabase_publishable_key": "",
+  "catalog_id": 1,
+  "developer_email": "",
+  "download_directory": "/home/oai/MizuLauncherGames",
+  "theme": "dark",
+  "language": "pl",
+  "auto_refresh": true,
+  "guest_mode": false,
+  "telemetry_enabled": true,
+  "admin_panel_url": "",
+  "drm_game_secret": "CHANGE_ME_PER_GAME",
+  "update_manifest_url": "",
+  "update_download_url": "",
+  "update_id": 1
+}

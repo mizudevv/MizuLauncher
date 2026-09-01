@@ -1,0 +1,13 @@
+{
+  "supabase_url": "",
+  "supabase_publishable_key": "",
+  "catalog_id": 1,
+  "developer_email": "",
+  "download_directory": "C:/Users/YourName/MizuLauncherGames",
+  "theme": "dark",
+  "language": "pl",
+  "auto_refresh": true,
+  "guest_mode": false,
+  "telemetry_enabled": true,
+  "admin_panel_url": "https://YOUR-VERCEL-PROJECT.vercel.app/"
+}
