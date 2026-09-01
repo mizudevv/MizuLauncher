@@ -1,0 +1,25 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+build/
+dist/
+*.spec
+node_modules/
+admin-panel/.vercel/
+admin-panel/config.js
+.env
+.env.*
+data/launcher_config.json
+data/session.json
+data/games_cache.json
+data/*.log
+*.log
+security_manifest.json
+# Build outputs
+/dist/
+/build/
+/installer-output/
+/installer/version.iss.inc

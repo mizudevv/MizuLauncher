@@ -1,0 +1,3 @@
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name MizuLauncher --add-data "VERSION.txt;." --add-data "assets;assets" main.py
+
+python tools\write_exe_manifest.py dist\MizuLauncher\MizuLauncher.exe

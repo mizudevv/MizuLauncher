@@ -1,0 +1,11 @@
+[functions.mizu-telemetry]
+verify_jwt = true
+
+[functions.mizu-drm-issue]
+verify_jwt = true
+
+[functions.mizu-drm-verify]
+verify_jwt = false
+
+[functions.mizu-admin-action]
+verify_jwt = true
