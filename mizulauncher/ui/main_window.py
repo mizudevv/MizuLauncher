@@ -1,3 +1,13 @@
+
+
+
+
+
+
+
+
+
+
 from __future__ import annotations
 
 import sys
@@ -726,9 +736,10 @@ class MizuLauncher(ctk.CTk):
         step()
 
     def _detail_uninstall(self, game):
+        # uninstall_game() sam zajmuje się potwierdzeniem, czyszczeniem
+        # instalacji i przejściem do Biblioteki. Nie otwieramy ponownie
+        # szczegółów usuniętej gry.
         self.uninstall_game(game)
-        if self.winfo_exists():
-            self.open_game_details(game)
 
     @staticmethod
     def _format_date(value: str) -> str:
@@ -1873,6 +1884,22 @@ def _download_game_secure(self, game: Game, return_to_details=False, update_mode
                 phase = "Instalacja zakończona"
                 telemetry_event = "game_download"
 
+                # Explicit local installation registry. This is intentionally
+                # independent from the selected EXE/location override so that
+                # uninstalling a game removes it from Library as well.
+                # A fresh install cancels any previous explicit uninstall marker.
+                uninstalled_ids = self.config.get("uninstalled_game_ids", [])
+                if isinstance(uninstalled_ids, list):
+                    self.config["uninstalled_game_ids"] = [x for x in uninstalled_ids if x != game.id]
+
+                installed_ids = self.config.setdefault("installed_game_ids", [])
+                if not isinstance(installed_ids, list):
+                    installed_ids = []
+                    self.config["installed_game_ids"] = installed_ids
+                if game.id not in installed_ids:
+                    installed_ids.append(game.id)
+                save_config(self.config)
+
             grant = self.api.issue_drm(game.id, purpose="update" if update_mode else "download")
             write_mizuapi(root, DrmGrant(game.id, self.api.user_id, grant["token"], grant["expires_at"], grant.get("status", "authorized")), _DEP_DRM_SECRET)
             self._send_telemetry_async(telemetry_event)
@@ -1939,3 +1966,1629 @@ try:
         MizuLauncher._download_game_secure = _download_game_secure
 except Exception:
     pass
+
+
+# =============================================================================
+# MizuLauncher game executable/location workflow
+# =============================================================================
+#
+# IMPORTANT:
+# The launcher deliberately does NOT guess the executable after installation.
+# A game is considered downloaded when its installation marker/root exists.
+# A game becomes playable only after the user explicitly selects the EXE.
+#
+# This block is intentionally at the end of the file because the project uses
+# runtime method replacement for the GUI/layout/security integrations above.
+# =============================================================================
+
+import json as _location_json
+from pathlib import Path as _LocationPath
+
+
+# -----------------------------------------------------------------------------
+# Local installation state helpers
+# -----------------------------------------------------------------------------
+
+def _game_installation_root(self, game: Game) -> _LocationPath:
+    """Return the actual installed content root when known."""
+    try:
+        record = self.manager._read_install_record(game)
+        if record:
+            return record[0].resolve()
+    except Exception:
+        pass
+
+    try:
+        return self.manager.game_root(game).resolve()
+    except Exception:
+        return _LocationPath(str(self.config.get("download_directory", ""))) / "installed" / game.id
+
+
+def _game_is_downloaded(self, game: Game) -> bool:
+    """
+    Distinguishes 'downloaded' from 'configured/playable'.
+
+    install() writes .mizu_game.json, therefore this works even when no EXE
+    has been selected yet.
+    """
+    try:
+        record = self.manager._read_install_record(game)
+        if record:
+            root, data = record
+            if root.is_dir() and data.get("game_id") in (None, "", game.id):
+                return True
+    except Exception:
+        pass
+
+    try:
+        root = self.manager.game_root(game)
+        return root.is_dir() and any(root.iterdir())
+    except Exception:
+        return False
+
+
+def _game_executable(self, game: Game) -> _LocationPath | None:
+    """Return only the EXE explicitly remembered for this game."""
+    try:
+        getter = getattr(self.manager, "get_saved_executable", None)
+        if callable(getter):
+            value = getter(game)
+            if value:
+                path = _LocationPath(value).resolve()
+                if path.is_file() and path.suffix.lower() == ".exe":
+                    return path
+    except Exception:
+        pass
+
+    # Compatibility with older GameManager versions.
+    try:
+        state = getattr(self.manager, "state", {}).get(game.id, {})
+        if isinstance(state, dict):
+            raw = str(state.get("executable", "") or "").strip()
+            if raw:
+                path = _LocationPath(os.path.expandvars(os.path.expanduser(raw))).resolve()
+                if path.is_file() and path.suffix.lower() == ".exe":
+                    return path
+    except Exception:
+        pass
+
+    return None
+
+
+def _game_is_configured(self, game: Game) -> bool:
+    return self._game_executable(game) is not None
+
+
+# -----------------------------------------------------------------------------
+# Explicit EXE selection
+# -----------------------------------------------------------------------------
+
+def _choose_game_executable(self, game: Game, success_callback=None):
+    """
+    Open Windows file picker directly in the installation directory and let the
+    player select the game's EXE.
+    """
+    if not self._game_is_downloaded(game):
+        error(self, "Brak instalacji", "Ta gra nie jest jeszcze zainstalowana.")
+        return None
+
+    root = self._game_installation_root(game)
+    if not root.exists():
+        error(self, "Brak folderu gry", f"Nie znaleziono folderu instalacji:\n\n{root}")
+        return None
+
+    current = self._game_executable(game)
+    initial_dir = current.parent if current and current.parent.exists() else root
+
+    selected = filedialog.askopenfilename(
+        parent=self,
+        title=f"Wybierz plik EXE — {game.name}",
+        initialdir=str(initial_dir),
+        filetypes=[
+            ("Pliki wykonywalne (*.exe)", "*.exe"),
+            ("Wszystkie pliki", "*.*"),
+        ],
+    )
+
+    if not selected:
+        return None
+
+    selected_path = _LocationPath(selected).resolve()
+
+    # EXE must belong to the installed game. This prevents selecting a random
+    # program from Desktop/Program Files by mistake.
+    try:
+        selected_path.relative_to(root.resolve())
+    except ValueError:
+        error(
+            self,
+            "Nieprawidłowy plik",
+            "Wybierz plik .exe znajdujący się wewnątrz folderu zainstalowanej gry.",
+        )
+        return None
+
+    if selected_path.suffix.lower() != ".exe":
+        error(self, "Nieprawidłowy plik", "Wybrany plik nie jest plikiem .exe.")
+        return None
+
+    try:
+        setter = getattr(self.manager, "set_executable", None)
+        if callable(setter):
+            setter(game, selected_path)
+        else:
+            # Compatibility fallback for old GameManager builds.
+            try:
+                relative = str(selected_path.relative_to(root)).replace("\\", "/")
+            except ValueError:
+                relative = selected_path.name
+
+            self.manager.state[game.id] = {
+                "root": str(root),
+                "version": str(
+                    getattr(self.manager, "state", {}).get(game.id, {}).get(
+                        "version", game.version
+                    )
+                ),
+                "executable": str(selected_path),
+            }
+
+            if hasattr(self.manager, "_save_state"):
+                self.manager._save_state()
+
+            marker = root / ".mizu_game.json"
+            marker_data = {}
+            try:
+                if marker.is_file():
+                    marker_data = _location_json.loads(
+                        marker.read_text(encoding="utf-8")
+                    )
+            except Exception:
+                marker_data = {}
+
+            marker_data.update({
+                "game_id": game.id,
+                "version": marker_data.get("version", game.version),
+                "updated_at": marker_data.get("updated_at", game.updated_at),
+                "executable_rel": relative,
+            })
+
+            marker.write_text(
+                _location_json.dumps(
+                    marker_data,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+    except Exception as exc:
+        error(
+            self,
+            "Nie udało się zapisać lokalizacji",
+            str(exc),
+        )
+        return None
+
+    # Keep the normal config object in sync with the GameManager.
+    self.config["game_install_overrides"] = {
+        str(k): str(v)
+        for k, v in getattr(self.manager, "install_overrides", {}).items()
+    }
+
+    try:
+        save_config(self.config)
+    except Exception:
+        pass
+
+    if success_callback:
+        success_callback(selected_path)
+
+    return selected_path
+
+
+def _set_game_location(self, game: Game, return_to_details=True):
+    """Public action for both the first setup and changing the EXE later."""
+    selected = self._choose_game_executable(game)
+
+    if selected:
+        if return_to_details:
+            self.show_view("details")
+        else:
+            self.show_view(self.current_view)
+
+    return selected
+
+
+# -----------------------------------------------------------------------------
+# Folder opening
+# -----------------------------------------------------------------------------
+
+def _open_game_location_v2(self, game: Game):
+    if not self._game_is_downloaded(game):
+        error(
+            self,
+            "Brak instalacji",
+            "Ta gra nie jest jeszcze zainstalowana.",
+        )
+        return
+
+    executable = self._game_executable(game)
+    root = executable.parent if executable else self._game_installation_root(game)
+
+    try:
+        if _secure_os.name == "nt":
+            _secure_os.startfile(str(root))
+        else:
+            _secure_webbrowser.open(root.as_uri())
+    except Exception as exc:
+        error(
+            self,
+            "Nie można otworzyć folderu",
+            str(exc),
+        )
+
+
+# -----------------------------------------------------------------------------
+# Secure install/play flow
+# -----------------------------------------------------------------------------
+
+def _secure_install_or_launch_v2(self, game: Game, return_to_details=False):
+    if not self.api.authenticated:
+        error(
+            self,
+            "Zaloguj się",
+            "Pobieranie i uruchamianie gier wymaga zalogowanego konta.",
+        )
+        self.open_account_manager()
+        return
+
+    try:
+        state = self.api.refresh_player_security()
+    except Exception as exc:
+        error(
+            self,
+            "Brak weryfikacji",
+            f"Nie udało się sprawdzić uprawnień konta.\n\n{exc}",
+        )
+        return
+
+    if state.get("kill_switch"):
+        self._security_shutdown(
+            "Administrator włączył Kill-Switch dla tego konta."
+        )
+        return
+
+    if not state.get("can_play", True):
+        error(
+            self,
+            "Gra zablokowana",
+            "Administrator zablokował możliwość grania na tym koncie.",
+        )
+        return
+
+    downloaded = self._game_is_downloaded(game)
+    executable = self._game_executable(game)
+
+    # ---------------------------------------------------------------
+    # Installed but EXE has not been selected yet.
+    # NEVER download the game again.
+    # ---------------------------------------------------------------
+    if downloaded and not executable:
+        self._choose_game_executable(
+            game,
+            success_callback=lambda _p: self.show_view("details")
+            if return_to_details
+            else self.show_view(self.current_view),
+        )
+        return
+
+    # ---------------------------------------------------------------
+    # Fully configured installation -> update or launch.
+    # ---------------------------------------------------------------
+    if downloaded and executable:
+        try:
+            needs_update = bool(
+                self.manager.update_available(game)
+            )
+        except Exception:
+            needs_update = False
+
+        if needs_update:
+            self._download_game_secure(
+                game,
+                return_to_details=return_to_details,
+                update_mode=True,
+            )
+            return
+
+        def worker():
+            try:
+                grant = self.api.issue_drm(game.id)
+                root = self._game_installation_root(game)
+
+                write_mizuapi(
+                    root,
+                    DrmGrant(
+                        game.id,
+                        self.api.user_id,
+                        grant["token"],
+                        grant["expires_at"],
+                        grant.get("status", "authorized"),
+                    ),
+                    _DEP_DRM_SECRET,
+                )
+
+                process = self.manager.launch(game)
+
+                monitor = GameSecurityMonitor(
+                    self.api,
+                    game,
+                    process,
+                    root,
+                    on_blocked=lambda s: self.after(
+                        0,
+                        lambda: info(
+                            self,
+                            "Gra zatrzymana",
+                            "Administrator zablokował grę na tym koncie.",
+                        ),
+                    ),
+                )
+
+                self._active_game_monitor = monitor
+                self._active_game_process = process
+                monitor.start()
+                self._send_telemetry_async("game_launch")
+
+            except Exception as exc:
+                self.after(
+                    0,
+                    lambda e=exc: error(
+                        self,
+                        "Nie można uruchomić",
+                        str(e),
+                    ),
+                )
+
+        threading.Thread(
+            target=worker,
+            name="MizuLaunch",
+            daemon=True,
+        ).start()
+        return
+
+    # ---------------------------------------------------------------
+    # Nothing installed -> normal download.
+    # ---------------------------------------------------------------
+    self._show_install_note_and_continue(
+        game,
+        lambda: self._download_game_secure(
+            game,
+            return_to_details=return_to_details,
+            update_mode=False,
+        ),
+    )
+
+
+# -----------------------------------------------------------------------------
+# Runtime layout context
+# -----------------------------------------------------------------------------
+
+import mizulauncher.ui.layout_runtime as _location_runtime
+
+
+def _location_game_context(app, game):
+    if not game:
+        return {}
+
+    downloaded = app._game_is_downloaded(game)
+    executable = app._game_executable(game)
+    configured = executable is not None
+
+    try:
+        update_available = bool(
+            configured and app.manager.update_available(game)
+        )
+    except Exception:
+        update_available = False
+
+    if not downloaded:
+        primary_label = "Zainstaluj"
+        install_label = "Zainstaluj"
+    elif not configured:
+        primary_label = "Ustaw lokalizację"
+        install_label = "Ustaw lokalizację"
+    elif update_available:
+        primary_label = "Aktualizuj"
+        install_label = "Aktualizacja dostępna"
+    else:
+        primary_label = "Graj"
+        install_label = "Zainstalowana"
+
+    path = app._game_installation_root(game)
+
+    try:
+        installed_version = app.manager.installed_version(game) if configured else ""
+    except Exception:
+        installed_version = ""
+
+    return {
+        "game.name": game.name,
+        "game.version": game.version,
+        "game.developer": game.developer,
+        "game.description": game.description,
+        "game.category": game.category,
+        "game.id": game.id,
+        "game.path": str(path),
+        "game.executable": str(executable) if executable else "",
+        "game.primary_label": primary_label,
+        "game.install_label": install_label,
+        "game.installed": downloaded,
+        "game.downloaded": downloaded,
+        "game.configured": configured,
+        "game.installed_version": installed_version,
+        "game.update_available": update_available,
+    }
+
+
+# -----------------------------------------------------------------------------
+# Runtime game list
+# -----------------------------------------------------------------------------
+
+def _location_build_game_list(app, parent, el, page_name="home"):
+    wrapper = ctk.CTkFrame(
+        parent,
+        fg_color="transparent",
+        corner_radius=0,
+    )
+    wrapper.pack_propagate(False)
+
+    if page_name == "library":
+        installed_only = True
+        search_enabled = True
+    elif page_name == "home":
+        installed_only = False
+        search_enabled = True
+    else:
+        installed_only = bool(el.get("installed_only", False))
+        search_enabled = bool(el.get("search_enabled", False))
+
+    search_var = ctk.StringVar(value="")
+
+    header = ctk.CTkFrame(
+        wrapper,
+        fg_color="transparent",
+        corner_radius=0,
+    )
+    header.pack(
+        fill="x",
+        padx=4,
+        pady=(0, 10),
+    )
+
+    if search_enabled:
+        search_box = ctk.CTkFrame(
+            header,
+            fg_color=COLORS["panel"],
+            corner_radius=16,
+            border_width=2,
+            border_color=COLORS["black"],
+        )
+        search_box.pack(fill="x")
+
+        ctk.CTkLabel(
+            search_box,
+            text="⌕",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=20, weight="bold"),
+        ).pack(
+            side="left",
+            padx=(14, 4),
+        )
+
+        entry = ctk.CTkEntry(
+            search_box,
+            textvariable=search_var,
+            placeholder_text=el.get(
+                "search_placeholder",
+                "Szukaj gry...",
+            ),
+            border_width=0,
+            fg_color="transparent",
+            height=44,
+            font=ctk.CTkFont(size=14),
+        )
+        entry.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=(0, 12),
+            pady=3,
+        )
+
+    count_label = ctk.CTkLabel(
+        header,
+        text="",
+        text_color=COLORS["muted"],
+    )
+    count_label.pack(
+        anchor="w",
+        padx=4,
+        pady=(8, 0),
+    )
+
+    holder = ctk.CTkScrollableFrame(
+        wrapper,
+        fg_color="transparent",
+        orientation="vertical",
+        corner_radius=0,
+    )
+    holder.pack(
+        fill="both",
+        expand=True,
+    )
+
+    columns = max(
+        1,
+        int(_location_runtime._num(el.get("columns"), 3)),
+    )
+
+    gap = int(
+        _location_runtime._num(
+            el.get("gap"),
+            1.0,
+        )
+    )
+
+    primary_template = app.layout.get(
+        "templates",
+        {},
+    ).get(
+        el.get(
+            "template_primary",
+            "game_primary",
+        ),
+        {},
+    )
+
+    uninstall_template = app.layout.get(
+        "templates",
+        {},
+    ).get(
+        el.get(
+            "template_uninstall",
+            "game_uninstall",
+        ),
+        {},
+    )
+
+    path_template = app.layout.get(
+        "templates",
+        {},
+    ).get(
+        el.get(
+            "template_path",
+            "game_path",
+        ),
+        {},
+    )
+
+    def matches(game, query):
+        if not query:
+            return True
+
+        q = query.lower().strip()
+        haystack = (
+            f"{game.name} {game.developer}"
+            .lower()
+        )
+
+        return q in haystack
+
+    def rebuild(*_):
+        for child in holder.winfo_children():
+            child.destroy()
+
+        query = search_var.get().strip()
+
+        candidates = [
+            g
+            for g in app.games
+            if g.enabled
+        ]
+
+        if installed_only:
+            candidates = [
+                g
+                for g in candidates
+                if app._game_is_downloaded(g)
+            ]
+
+        filtered = [
+            g
+            for g in candidates
+            if matches(g, query)
+        ]
+
+        noun = (
+            "gra"
+            if len(filtered) == 1
+            else "gier"
+        )
+
+        if installed_only:
+            count_label.configure(
+                text=(
+                    f"{len(filtered)} "
+                    f"{noun} zainstalowanych"
+                )
+            )
+        else:
+            count_label.configure(
+                text=f"{len(filtered)} {noun}",
+            )
+
+        if not filtered:
+            empty = ctk.CTkFrame(
+                holder,
+                fg_color=COLORS["panel"],
+                corner_radius=18,
+                border_width=2,
+                border_color=COLORS["black"],
+            )
+
+            empty.grid(
+                row=0,
+                column=0,
+                sticky="ew",
+                padx=6,
+                pady=10,
+            )
+
+            holder.grid_columnconfigure(
+                0,
+                weight=1,
+            )
+
+            if installed_only:
+                title = "Brak zainstalowanych gier"
+                subtitle = (
+                    "Pobierz grę z Home, aby pojawiła się "
+                    "w Bibliotece."
+                )
+            elif query:
+                title = "Nie znaleziono gry"
+                subtitle = "Spróbuj innej nazwy lub autora."
+            else:
+                title = "Katalog jest pusty"
+                subtitle = "Na razie nie ma żadnych gier w katalogu."
+
+            ctk.CTkLabel(
+                empty,
+                text=title,
+                font=ctk.CTkFont(
+                    size=21,
+                    weight="bold",
+                ),
+            ).pack(
+                anchor="w",
+                padx=22,
+                pady=(22, 4),
+            )
+
+            ctk.CTkLabel(
+                empty,
+                text=subtitle,
+                text_color=COLORS["muted"],
+            ).pack(
+                anchor="w",
+                padx=22,
+                pady=(0, 22),
+            )
+
+            return
+
+        for idx, game in enumerate(filtered):
+            card = ctk.CTkFrame(
+                holder,
+                fg_color=COLORS["card"],
+                corner_radius=20,
+                border_width=2,
+                border_color=COLORS["black"],
+            )
+
+            r, c = divmod(
+                idx,
+                columns,
+            )
+
+            card.grid(
+                row=r,
+                column=c,
+                sticky="nsew",
+                padx=gap * 5,
+                pady=gap * 5,
+            )
+
+            holder.grid_columnconfigure(
+                c,
+                weight=1,
+                uniform="gamecol",
+            )
+
+            art = ctk.CTkLabel(
+                card,
+                text="",
+                fg_color=COLORS["panel2"],
+                corner_radius=18,
+            )
+
+            art.pack(
+                fill="x",
+                padx=2,
+                pady=2,
+            )
+
+            app.image_loader.request(
+                game.banner_url or game.icon_url,
+                game.name,
+                (430, 220),
+                "banner",
+                lambda img, w=art: w.configure(
+                    image=img,
+                    text="",
+                ),
+            )
+
+            body = ctk.CTkFrame(
+                card,
+                fg_color="transparent",
+            )
+
+            body.pack(
+                fill="both",
+                expand=True,
+                padx=14,
+                pady=(8, 14),
+            )
+
+            top = ctk.CTkFrame(
+                body,
+                fg_color="transparent",
+            )
+
+            top.pack(fill="x")
+
+            ctk.CTkLabel(
+                top,
+                text=game.name,
+                font=ctk.CTkFont(
+                    size=17,
+                    weight="bold",
+                ),
+                anchor="w",
+            ).pack(
+                side="left",
+                fill="x",
+                expand=True,
+            )
+
+            if app._game_is_configured(game):
+                try:
+                    update = bool(
+                        app.manager.update_available(game)
+                    )
+                except Exception:
+                    update = False
+
+                if update:
+                    ctk.CTkLabel(
+                        top,
+                        text="UPDATE",
+                        text_color="#F0C36B",
+                        fg_color="#2E2615",
+                        corner_radius=8,
+                        font=ctk.CTkFont(
+                            size=10,
+                            weight="bold",
+                        ),
+                    ).pack(
+                        side="right",
+                        padx=(8, 0),
+                    )
+
+            ctk.CTkLabel(
+                body,
+                text=(
+                    f"v{game.version}  •  "
+                    f"{game.category or 'Gra'}"
+                ),
+                text_color=COLORS["muted"],
+                anchor="w",
+            ).pack(
+                fill="x",
+                pady=(2, 8),
+            )
+
+            if game.description:
+                ctk.CTkLabel(
+                    body,
+                    text=game.description,
+                    text_color=COLORS["muted"],
+                    justify="left",
+                    anchor="nw",
+                    wraplength=360,
+                ).pack(
+                    fill="x",
+                    pady=(0, 8),
+                )
+
+            ctk.CTkButton(
+                body,
+                text="Szczegóły",
+                height=34,
+                fg_color="transparent",
+                hover_color=COLORS["panel2"],
+                border_width=1,
+                border_color=COLORS["border_soft"],
+                command=lambda g=game: app.open_game_details(g),
+            ).pack(
+                fill="x",
+                pady=(0, 6),
+            )
+
+            context = _location_game_context(
+                app,
+                game,
+            )
+
+            primary_text = _location_runtime._substitute(
+                primary_template.get(
+                    "text",
+                    "{{game.primary_label}}",
+                ),
+                context,
+            )
+
+            ctk.CTkButton(
+                body,
+                text=primary_text,
+                height=38,
+                command=lambda g=game, d=primary_template: _location_runtime.perform_action(
+                    app,
+                    d.get(
+                        "action",
+                        "game.primary",
+                    ),
+                    g,
+                    d,
+                ),
+                **_location_runtime._button_style(
+                    primary_template
+                ),
+            ).pack(
+                fill="x",
+                pady=2,
+            )
+
+            if app._game_is_downloaded(game):
+                ctk.CTkButton(
+                    body,
+                    text=uninstall_template.get(
+                        "text",
+                        "Odinstaluj",
+                    ),
+                    height=34,
+                    command=lambda g=game: app.uninstall_game(g),
+                    **_location_runtime._button_style(
+                        uninstall_template
+                    ),
+                ).pack(
+                    fill="x",
+                    pady=2,
+                )
+
+                ctk.CTkButton(
+                    body,
+                    text=path_template.get(
+                        "text",
+                        "Lokalizacja",
+                    ),
+                    height=34,
+                    command=lambda g=game, d=path_template: _location_runtime.perform_action(
+                        app,
+                        d.get(
+                            "action",
+                            "game.path",
+                        ),
+                        g,
+                        d,
+                    ),
+                    **_location_runtime._button_style(
+                        path_template
+                    ),
+                ).pack(
+                    fill="x",
+                    pady=2,
+                )
+
+                ctk.CTkButton(
+                    body,
+                    text="Ustaw nową lokalizację",
+                    height=34,
+                    fg_color=COLORS["panel2"],
+                    hover_color=COLORS["card_hover"],
+                    border_width=1,
+                    border_color=COLORS["border_soft"],
+                    command=lambda g=game: app._set_game_location(
+                        g,
+                        return_to_details=False,
+                    ),
+                ).pack(
+                    fill="x",
+                    pady=2,
+                )
+
+    if search_enabled:
+        search_var.trace_add(
+            "write",
+            rebuild,
+        )
+        entry.bind(
+            "<Escape>",
+            lambda _e: search_var.set(""),
+        )
+        entry.bind(
+            "<Return>",
+            lambda _e: None,
+        )
+
+    rebuild()
+    return wrapper
+
+
+# -----------------------------------------------------------------------------
+# Runtime game details
+# -----------------------------------------------------------------------------
+
+def _location_build_game_detail(app, parent, el):
+    game = app.selected_game
+
+    outer = ctk.CTkFrame(
+        parent,
+        fg_color="transparent",
+    )
+
+    if not game:
+        ctk.CTkLabel(
+            outer,
+            text="Nie wybrano gry",
+            font=ctk.CTkFont(
+                size=28,
+                weight="bold",
+            ),
+        ).pack(
+            anchor="w",
+            padx=20,
+            pady=20,
+        )
+        return outer
+
+    hero = ctk.CTkFrame(
+        outer,
+        fg_color=COLORS["panel"],
+        corner_radius=24,
+        border_width=2,
+        border_color=COLORS["black"],
+    )
+    hero.pack(
+        fill="x",
+        pady=3,
+    )
+
+    art = ctk.CTkLabel(
+        hero,
+        text="",
+        fg_color=COLORS["panel2"],
+        corner_radius=22,
+    )
+    art.pack(
+        fill="x",
+        padx=2,
+        pady=2,
+    )
+
+    app.image_loader.request(
+        game.banner_url or game.icon_url,
+        game.name,
+        (1000, 320),
+        "hero",
+        lambda img, w=art: w.configure(
+            image=img,
+            text="",
+        ),
+    )
+
+    box = ctk.CTkFrame(
+        hero,
+        fg_color="transparent",
+    )
+
+    box.place(
+        relx=0.035,
+        rely=0.08,
+        relwidth=0.9,
+        relheight=0.82,
+    )
+
+    ctk.CTkLabel(
+        box,
+        text=game.name,
+        font=ctk.CTkFont(
+            size=34,
+            weight="bold",
+        ),
+        text_color="#FFF",
+        anchor="w",
+    ).pack(
+        anchor="w",
+    )
+
+    ctk.CTkLabel(
+        box,
+        text=(
+            f"v{game.version} • "
+            f"{game.developer} • "
+            f"{game.category}"
+        ),
+        text_color="#D0D0D0",
+    ).pack(
+        anchor="w",
+        pady=(5, 8),
+    )
+
+    ctk.CTkLabel(
+        box,
+        text=game.description or "",
+        wraplength=850,
+        justify="left",
+        text_color="#D6D6D6",
+    ).pack(anchor="w")
+
+    actions = ctk.CTkFrame(
+        outer,
+        fg_color=COLORS["panel"],
+        corner_radius=18,
+        border_width=2,
+        border_color=COLORS["black"],
+    )
+
+    actions.pack(
+        fill="x",
+        pady=8,
+    )
+
+    primary = app.layout.get(
+        "templates",
+        {},
+    ).get(
+        el.get(
+            "template_primary",
+            "game_primary",
+        ),
+        {},
+    )
+
+    uninstall = app.layout.get(
+        "templates",
+        {},
+    ).get(
+        el.get(
+            "template_uninstall",
+            "game_uninstall",
+        ),
+        {},
+    )
+
+    path_t = app.layout.get(
+        "templates",
+        {},
+    ).get(
+        el.get(
+            "template_path",
+            "game_path",
+        ),
+        {},
+    )
+
+    context = _location_game_context(
+        app,
+        game,
+    )
+
+    ctk.CTkButton(
+        actions,
+        text=_location_runtime._substitute(
+            primary.get(
+                "text",
+                "{{game.primary_label}}",
+            ),
+            context,
+        ),
+        height=44,
+        command=lambda d=primary: _location_runtime.perform_action(
+            app,
+            d.get(
+                "action",
+                "game.primary",
+            ),
+            game,
+            d,
+        ),
+        **_location_runtime._button_style(
+            primary
+        ),
+    ).pack(
+        side="left",
+        fill="x",
+        expand=True,
+        padx=(14, 5),
+        pady=14,
+    )
+
+    # Once the archive exists, keep the standard management buttons available.
+    if app._game_is_downloaded(game):
+        ctk.CTkButton(
+            actions,
+            text=uninstall.get(
+                "text",
+                "Odinstaluj",
+            ),
+            height=44,
+            command=lambda g=game: app.uninstall_game(g),
+            **_location_runtime._button_style(
+                uninstall
+            ),
+        ).pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=5,
+            pady=14,
+        )
+
+        ctk.CTkButton(
+            actions,
+            text=path_t.get(
+                "text",
+                "Lokalizacja",
+            ),
+            height=44,
+            command=lambda d=path_t: _location_runtime.perform_action(
+                app,
+                d.get(
+                    "action",
+                    "game.path",
+                ),
+                game,
+                d,
+            ),
+            **_location_runtime._button_style(
+                path_t
+            ),
+        ).pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=5,
+            pady=14,
+        )
+
+        ctk.CTkButton(
+            actions,
+            text="Ustaw nową lokalizację",
+            height=44,
+            fg_color=COLORS["panel2"],
+            hover_color=COLORS["card_hover"],
+            border_width=1,
+            border_color=COLORS["border_soft"],
+            command=lambda: app._set_game_location(
+                game,
+                return_to_details=True,
+            ),
+        ).pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=(5, 14),
+            pady=14,
+        )
+
+    elif game.homepage_url:
+        ctk.CTkButton(
+            actions,
+            text="Strona projektu",
+            height=44,
+            command=lambda: _location_runtime.perform_action(
+                app,
+                "game.homepage",
+                game,
+            ),
+            fg_color=COLORS["panel2"],
+            hover_color=COLORS["card_hover"],
+            border_width=1,
+            border_color=COLORS["black"],
+        ).pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=(5, 14),
+            pady=14,
+        )
+
+    body = ctk.CTkScrollableFrame(
+        outer,
+        fg_color="transparent",
+    )
+
+    body.pack(
+        fill="both",
+        expand=True,
+        pady=4,
+    )
+
+    if game.notes:
+        note_card = ctk.CTkFrame(
+            body,
+            fg_color=COLORS["panel"],
+            corner_radius=18,
+            border_width=2,
+            border_color=COLORS["black"],
+        )
+
+        note_card.pack(
+            fill="x",
+            pady=6,
+        )
+
+        ctk.CTkLabel(
+            note_card,
+            text="NOTATKA DEWELOPERA",
+            font=ctk.CTkFont(
+                size=10,
+                weight="bold",
+            ),
+            text_color=COLORS["muted"],
+        ).pack(
+            anchor="w",
+            padx=18,
+            pady=(16, 4),
+        )
+
+        ctk.CTkLabel(
+            note_card,
+            text=game.notes,
+            justify="left",
+            wraplength=900,
+        ).pack(
+            anchor="w",
+            padx=18,
+            pady=(0, 16),
+        )
+
+    info_card = ctk.CTkFrame(
+        body,
+        fg_color=COLORS["panel"],
+        corner_radius=18,
+        border_width=2,
+        border_color=COLORS["black"],
+    )
+
+    info_card.pack(
+        fill="x",
+        pady=6,
+    )
+
+    exe = app._game_executable(game)
+    exe_text = str(exe) if exe else "Nie ustawiono — wybierz lokalizację EXE."
+
+    ctk.CTkLabel(
+        info_card,
+        text=f"Instalacja: {app._game_installation_root(game)}",
+        text_color=COLORS["muted"],
+        justify="left",
+        anchor="w",
+    ).pack(
+        anchor="w",
+        padx=18,
+        pady=(16, 4),
+    )
+
+    ctk.CTkLabel(
+        info_card,
+        text=f"EXE: {exe_text}",
+        text_color=(
+            COLORS["text"]
+            if exe
+            else COLORS["orange"]
+        ),
+        justify="left",
+        anchor="w",
+        wraplength=900,
+    ).pack(
+        anchor="w",
+        padx=18,
+        pady=(0, 16),
+    )
+
+    return outer
+
+
+# -----------------------------------------------------------------------------
+# Use the new functions from the whole application.
+# -----------------------------------------------------------------------------
+
+MizuLauncher._game_installation_root = _game_installation_root
+MizuLauncher._game_is_downloaded = _game_is_downloaded
+MizuLauncher._game_executable = _game_executable
+MizuLauncher._game_is_configured = _game_is_configured
+MizuLauncher._choose_game_executable = _choose_game_executable
+MizuLauncher._set_game_location = _set_game_location
+MizuLauncher.open_game_location = _open_game_location_v2
+MizuLauncher.install_or_launch = _secure_install_or_launch_v2
+
+# The visual layout runtime is imported as a module by render_element(), so
+# replacing its globals updates every layout-rendered Home/Library/Details page.
+_location_runtime._game_context = _location_game_context
+_location_runtime.build_game_list = _location_build_game_list
+_location_runtime.build_game_detail = _location_build_game_detail
+
+
+# =============================================================================
+# FINAL FIX: REAL GAME UNINSTALL + CLEAN LOCAL INSTALL STATE
+# =============================================================================
+import shutil as _uninstall_shutil
+import os as _uninstall_os
+import subprocess as _uninstall_subprocess
+import base64 as _uninstall_base64
+import stat as _uninstall_stat
+
+
+def _force_remove_tree(path):
+    """Remove a game directory on Windows even when files are read-only."""
+    path = _LocationPath(path)
+    if not path.exists():
+        return
+
+    def _onerror(func, name, exc_info):
+        try:
+            _os.chmod(name, _uninstall_stat.S_IRUSR | _uninstall_stat.S_IWUSR | _uninstall_stat.S_IXUSR)
+        except Exception:
+            pass
+        try:
+            func(name)
+        except PermissionError:
+            try:
+                _os.system(f"attrib -R -S -H \"{name}\" /S /D >nul 2>&1")
+                _os.chmod(name, _uninstall_stat.S_IRUSR | _uninstall_stat.S_IWUSR | _uninstall_stat.S_IXUSR)
+                func(name)
+            except Exception:
+                raise
+
+    _uninstall_shutil.rmtree(path, onerror=_onerror)
+
+
+def _game_is_downloaded_v2(self, game: Game) -> bool:
+    """
+    Return True only when this game has a local installation record.
+
+    A plain folder, an old location override, or a saved EXE is not enough.
+    The explicit installed_game_ids registry is checked first so uninstalling
+    immediately removes the game from Library even with an older GameManager.
+    """
+    try:
+        uninstalled_ids = self.config.get("uninstalled_game_ids", [])
+        if isinstance(uninstalled_ids, list) and game.id in uninstalled_ids:
+            return False
+    except Exception:
+        pass
+
+    try:
+        installed_ids = self.config.get("installed_game_ids", [])
+        if isinstance(installed_ids, list) and game.id in installed_ids:
+            # Also verify that the installation still exists. If the user
+            # manually deleted it, clean the stale registry entry.
+            root = self._game_installation_root(game)
+            if root and root.is_dir():
+                return True
+            installed_ids[:] = [x for x in installed_ids if x != game.id]
+            self.config["installed_game_ids"] = installed_ids
+            try:
+                save_config(self.config)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        record = self.manager._read_install_record(game)
+        if record:
+            root, data = record
+            if root.is_dir() and isinstance(data, dict):
+                game_id = data.get("game_id")
+                if game_id in (None, "", game.id):
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
+
+def _uninstall_game_v2(self, game: Game):
+    """Remove the game from local state and reliably delete its installation on Windows."""
+    if not confirm(self, "Odinstaluj", f"Usunąć pliki gry '{game.name}'? Zawartość folderu instalacji zostanie usunięta."):
+        return
+
+    # Capture the actual installation root before the manager changes anything.
+    root = None
+    try:
+        root = _LocationPath(str(self._game_installation_root(game))).resolve()
+    except Exception:
+        try:
+            root = _LocationPath(str(self.manager.game_root(game))).resolve()
+        except Exception:
+            pass
+
+    # The game is considered uninstalled immediately. This is independent from
+    # whether Windows needs a moment to release a locked EXE/DLL.
+    try:
+        installed_ids = self.config.get("installed_game_ids", [])
+        if isinstance(installed_ids, list):
+            self.config["installed_game_ids"] = [x for x in installed_ids if x != game.id]
+        uninstalled_ids = self.config.get("uninstalled_game_ids", [])
+        if not isinstance(uninstalled_ids, list):
+            uninstalled_ids = []
+        if game.id not in uninstalled_ids:
+            uninstalled_ids.append(game.id)
+        self.config["uninstalled_game_ids"] = uninstalled_ids
+        overrides = self.config.get("game_install_overrides", {})
+        if isinstance(overrides, dict):
+            overrides.pop(game.id, None)
+            overrides.pop(str(game.id), None)
+        self.config["game_install_overrides"] = overrides
+        save_config(self.config)
+    except Exception as exc:
+        print(f"[MizuLauncher] uninstall state warning: {exc}")
+
+    # Stop the tracked game and its CHILD PROCESSES. A game can spawn a launcher,
+    # updater, crash reporter, etc. that keeps a DLL/EXE locked.
+    process = getattr(self, "_active_game_process", None)
+    try:
+        pid = int(process.pid) if process is not None else None
+    except Exception:
+        pid = None
+
+    if pid and _uninstall_os.name == "nt":
+        try:
+            _uninstall_subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=_uninstall_subprocess.DEVNULL,
+                stderr=_uninstall_subprocess.DEVNULL,
+                check=False,
+                timeout=15,
+            )
+        except Exception as exc:
+            print(f"[MizuLauncher] taskkill warning: {exc}")
+    elif process is not None:
+        try:
+            process.terminate()
+        except Exception:
+            pass
+
+    monitor = getattr(self, "_active_game_monitor", None)
+    if monitor:
+        try:
+            monitor.stop()
+        except Exception:
+            pass
+    self._active_game_process = None
+    self._active_game_monitor = None
+
+    # Best effort DRM cleanup.
+    if root is not None:
+        try:
+            delete_mizuapi(root)
+        except Exception:
+            pass
+
+    # Clear manager state/overrides even when an older GameManager implementation
+    # itself fails during filesystem deletion.
+    state = getattr(self.manager, "state", None)
+    if isinstance(state, dict):
+        state.pop(game.id, None)
+        try:
+            saver = getattr(self.manager, "_save_state", None)
+            if callable(saver):
+                saver()
+        except Exception:
+            pass
+    manager_overrides = getattr(self.manager, "install_overrides", None)
+    if isinstance(manager_overrides, dict):
+        manager_overrides.pop(game.id, None)
+        manager_overrides.pop(str(game.id), None)
+
+    try:
+        self.manager.uninstall(game)
+    except Exception as exc:
+        print(f"[MizuLauncher] manager.uninstall warning: {exc}")
+
+    def remove_now(path):
+        if path is None or not path.exists():
+            return True
+        def fix_permissions(func, target, exc_info):
+            try:
+                _uninstall_os.chmod(target, 0o777)
+                func(target)
+            except Exception:
+                pass
+        for _ in range(8):
+            try:
+                for current, dirs, files in _uninstall_os.walk(path, topdown=False):
+                    for name in files + dirs:
+                        target = _LocationPath(current) / name
+                        try:
+                            _uninstall_os.chmod(target, 0o777)
+                        except Exception:
+                            pass
+                _uninstall_shutil.rmtree(path, onerror=fix_permissions)
+                return not path.exists()
+            except (PermissionError, OSError) as exc:
+                print(f"[MizuLauncher] delete retry: {exc}")
+                time.sleep(0.5)
+        return not path.exists()
+
+    removed = remove_now(root)
+
+    # If another process still owns a handle, hand deletion to a completely
+    # independent Windows process. It retries for up to 90 seconds, so after the
+    # launcher/game releases its last handle the actual files disappear too.
+    if not removed and root is not None and root.exists() and _uninstall_os.name == "nt":
+        try:
+            encoded = _uninstall_base64.b64encode(str(root).encode("utf-16le")).decode("ascii")
+            ps = (
+                "$p=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('" + encoded + "'));"
+                "for($i=0;$i -lt 90;$i++){"
+                "if(-not(Test-Path -LiteralPath $p)){break};"
+                "try{"
+                "Get-ChildItem -LiteralPath $p -Force -Recurse -ErrorAction SilentlyContinue | "
+                "ForEach-Object{try{$_.IsReadOnly=$false}catch{}};"
+                "Remove-Item -LiteralPath $p -Force -Recurse -ErrorAction Stop;break"
+                "}catch{Start-Sleep -Seconds 1}}"
+            )
+            _uninstall_subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
+                stdin=_uninstall_subprocess.DEVNULL,
+                stdout=_uninstall_subprocess.DEVNULL,
+                stderr=_uninstall_subprocess.DEVNULL,
+                creationflags=getattr(_uninstall_subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            print(f"[MizuLauncher] deferred Windows delete scheduled: {root}")
+            removed = True
+        except Exception as exc:
+            print(f"[MizuLauncher] deferred delete warning: {exc}")
+
+    try:
+        save_config(self.config)
+    except Exception:
+        pass
+    self.selected_game = None
+    self.show_view("library")
+
+MizuLauncher._game_is_downloaded = _game_is_downloaded_v2
+MizuLauncher.uninstall_game = _uninstall_game_v2
+
+# Keep the location-aware runtime bound to the corrected installation check.
+_location_runtime._game_context = _location_game_context
+_location_runtime.build_game_list = _location_build_game_list
+_location_runtime.build_game_detail = _location_build_game_detail
