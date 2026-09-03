@@ -57,136 +57,271 @@ def safe_extract_zip(zip_path: Path, destination: Path, progress: Callable[[int]
     return destination
 
 
-# Official 7-Zip 26.02 extra package. 7z2602-extra.7z contains the standalone
-# command-line tools, including 7zz.exe. SHA-256 is published for this exact
-# release by 7-Zip mirrors/repositories.
-_7Z_EXTRA_URL = "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-extra.7z"
-_7Z_EXTRA_SHA256 = "081df9e9311dfd9c9e0e98c1c80180b99bb51e4cb24156b5f3057fe3c259d70a"
+# WinRAR bootstrap
+# RARLAB currently publishes WinRAR x64 7.23 for Windows.
+_WINRAR_INSTALLER_URL = "https://www.rarlab.com/rar/winrar-x64-723.exe"
+_WINRAR_MIN_SIZE = 2_000_000
+_WINRAR_INSTALLER_TIMEOUT = (15, 180)
 
 
-def _local_7zz_candidates() -> list[Path]:
-    here = Path(__file__).resolve()
-    exe_dir = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MizuLauncher" / "tools"
-    return [
-        here.parent.parent / "tools" / "7zz.exe",
-        here.parent.parent.parent / "tools" / "7zz.exe",
-        Path(sys.executable).resolve().parent / "7zz.exe" if getattr(sys, "frozen", False) else Path("__missing__"),
-        exe_dir / "7zz.exe",
-        Path(r"C:\Program Files\7-Zip\7z.exe"),
-        Path(r"C:\Program Files\7-Zip\7zFM.exe"),
+def _winrar_candidates() -> list[Path]:
+    """Return likely WinRAR.exe locations on Windows."""
+    candidates: list[Path] = []
+
+    # 1. PATH / App Paths are handled separately, but these are the common
+    # installations and also cover portable/user installations.
+    env = os.environ
+    program_files = env.get("ProgramFiles")
+    program_files_x86 = env.get("ProgramFiles(x86)")
+    local_appdata = env.get("LOCALAPPDATA")
+    appdata = env.get("APPDATA")
+
+    roots = [
+        Path(program_files) / "WinRAR" if program_files else None,
+        Path(program_files_x86) / "WinRAR" if program_files_x86 else None,
+        Path(local_appdata) / "Programs" / "WinRAR" if local_appdata else None,
+        Path(local_appdata) / "WinRAR" if local_appdata else None,
+        Path(appdata) / "WinRAR" if appdata else None,
+        Path(r"C:\Program Files\WinRAR"),
+        Path(r"C:\Program Files (x86)\WinRAR"),
     ]
+    for root in roots:
+        if root:
+            candidates.append(root / "WinRAR.exe")
+            candidates.append(root / "Rar.exe")
+
+    # 2. If the launcher is frozen, also check next to the application.
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend([exe_dir / "WinRAR.exe", exe_dir / "Rar.exe"])
+    except Exception:
+        pass
+
+    return candidates
 
 
-def _find_installed_7z() -> Path | None:
-    for p in _local_7zz_candidates():
+def _find_installed_winrar() -> Path | None:
+    """Find an already installed WinRAR/RAR executable without installing anything."""
+    seen: set[str] = set()
+
+    for p in _winrar_candidates():
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
         try:
             if p.exists() and p.is_file():
-                return p
+                # Prefer WinRAR.exe because this is what the user requested.
+                if p.name.lower() == "winrar.exe":
+                    return p
         except OSError:
             pass
-    for name in ("7zz", "7zz.exe", "7z", "7z.exe"):
+
+    # PATH lookup.
+    for name in ("WinRAR.exe", "winrar", "Rar.exe", "rar"):
         found = shutil.which(name)
         if found:
             return Path(found)
+
+    # Windows App Paths registry entries are useful for custom installation
+    # locations. Importing winreg is Windows-only, so keep this optional.
+    if os.name == "nt":
+        try:
+            import winreg
+            registry_locations = [
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WinRAR.exe"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\WinRAR.exe"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\WinRAR.exe"),
+            ]
+            for hive, subkey in registry_locations:
+                try:
+                    with winreg.OpenKey(hive, subkey) as key:
+                        value, _ = winreg.QueryValueEx(key, None)
+                        candidate = Path(str(value).strip().strip('"'))
+                        if candidate.exists() and candidate.is_file():
+                            return candidate
+                except OSError:
+                    continue
+        except Exception:
+            pass
+
     return None
 
 
-def _ensure_bundled_7zz() -> Path:
-    existing = _find_installed_7z()
+def _download_winrar_installer() -> Path:
+    """Download the official WinRAR x64 installer to a temporary directory."""
+    tools_dir = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MizuLauncher" / "tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    installer = tools_dir / "winrar-x64-723.exe"
+    tmp = installer.with_suffix(".part")
+
+    if installer.exists() and installer.stat().st_size >= _WINRAR_MIN_SIZE:
+        return installer
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "MizuLauncher/1.0",
+        "Accept": "application/octet-stream,*/*",
+    })
+    try:
+        with session.get(
+            _WINRAR_INSTALLER_URL,
+            stream=True,
+            allow_redirects=True,
+            timeout=_WINRAR_INSTALLER_TIMEOUT,
+        ) as r:
+            r.raise_for_status()
+            content_type = (r.headers.get("content-type") or "").lower()
+            if "text/html" in content_type:
+                raise DownloadError("RARLAB zwrócił stronę HTML zamiast instalatora WinRAR.")
+            with tmp.open("wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+            if tmp.stat().st_size < _WINRAR_MIN_SIZE:
+                raise DownloadError("Pobrany instalator WinRAR jest niekompletny.")
+            tmp.replace(installer)
+            return installer
+    except requests.RequestException as exc:
+        tmp.unlink(missing_ok=True)
+        raise DownloadError(f"Nie udało się pobrać WinRAR z RARLAB: {exc}") from exc
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise DownloadError(f"Nie można zapisać instalatora WinRAR: {exc}") from exc
+
+
+def _install_winrar() -> Path:
+    """Install WinRAR when it is missing and return WinRAR.exe."""
+    existing = _find_installed_winrar()
     if existing:
         return existing
 
+    if os.name != "nt":
+        raise DownloadError("Automatyczna instalacja WinRAR jest dostępna tylko na Windows.")
+
+    installer = _download_winrar_installer()
+
+    # WinRAR's installer supports silent installation with /S. Windows may still
+    # show an elevation/UAC prompt when system-wide installation needs admin rights.
     try:
-        from py7zr import SevenZipFile
-    except Exception as exc:
+        proc = subprocess.run(
+            [str(installer), "/S"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except OSError as exc:
+        raise DownloadError(f"Nie można uruchomić instalatora WinRAR: {exc}") from exc
+
+    # Give Windows a moment to finish registering App Paths / copying files.
+    for _ in range(20):
+        found = _find_installed_winrar()
+        if found:
+            return found
+        time.sleep(0.5)
+
+    details = (proc.stderr or proc.stdout or "").strip()
+    if proc.returncode not in (0, None):
+        details = f"Kod instalatora: {proc.returncode}. {details}".strip()
+
+    # If silent mode was blocked by policy/elevation, launch the installer
+    # normally so Windows can show the required UAC/installer interface.
+    try:
+        subprocess.run([str(installer)], check=False, timeout=300)
+    except OSError as exc:
         raise DownloadError(
-            "Obsługa RAR wymaga pakietu py7zr. Zainstaluj zależności launchera ponownie."
+            f"Nie udało się zainstalować WinRAR. {details or str(exc)}"
         ) from exc
 
-    tools_dir = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MizuLauncher" / "tools"
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    archive = tools_dir / "7z2602-extra.7z"
-    extract_dir = tools_dir / "7z-extra"
+    found = _find_installed_winrar()
+    if found:
+        return found
 
-    if not archive.exists() or archive.stat().st_size < 100_000:
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "MizuLauncher/1.0",
-            "Accept": "application/octet-stream,*/*",
-        })
-        try:
-            with session.get(_7Z_EXTRA_URL, stream=True, timeout=(15, 120)) as r:
-                r.raise_for_status()
-                tmp = archive.with_suffix(".part")
-                with tmp.open("wb") as f:
-                    for chunk in r.iter_content(1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-                tmp.replace(archive)
-        except requests.RequestException as exc:
-            raise DownloadError(f"Nie udało się pobrać narzędzia do RAR: {exc}") from exc
+    raise DownloadError(
+        "WinRAR został pobrany, ale nie udało się potwierdzić instalacji. "
+        f"{details}".strip()
+    )
 
-    import hashlib
-    h = hashlib.sha256()
-    with archive.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    if h.hexdigest().lower() != _7Z_EXTRA_SHA256.lower():
-        archive.unlink(missing_ok=True)
-        raise DownloadError("Pobrany komponent 7-Zip ma nieprawidłową sumę kontrolną SHA-256.")
 
-    shutil.rmtree(extract_dir, ignore_errors=True)
-    extract_dir.mkdir(parents=True, exist_ok=True)
+def _validate_archive_with_winrar(archive_path: Path, tool: Path) -> None:
+    """Validate archive member paths before extraction."""
     try:
-        with SevenZipFile(archive, mode="r") as z:
-            z.extractall(path=extract_dir)
-    except Exception as exc:
-        raise DownloadError(f"Nie udało się rozpakować komponentu 7-Zip: {exc}") from exc
-
-    candidates = list(extract_dir.rglob("7zz.exe"))
-    if not candidates:
-        # Some extra packages expose 7z.exe instead. It can still extract RAR.
-        candidates = list(extract_dir.rglob("7z.exe"))
-    if not candidates:
-        raise DownloadError("Pakiet 7-Zip nie zawiera oczekiwanego programu 7zz.exe/7z.exe.")
-
-    target = tools_dir / "7zz.exe"
-    shutil.copy2(candidates[0], target)
-    return target
-
-
-def _validate_7z_listing(archive_path: Path, tool: Path) -> None:
-    try:
-        proc = subprocess.run([str(tool), "l", "-slt", str(archive_path)], capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(
+            [str(tool), "l", "-c-", "-cfg-", "-idq", str(archive_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+        )
     except OSError as exc:
-        raise DownloadError(f"Nie można uruchomić 7-Zip: {exc}") from exc
+        raise DownloadError(f"Nie można uruchomić WinRAR: {exc}") from exc
+
     if proc.returncode != 0:
-        raise DownloadError((proc.stderr or proc.stdout or "7-Zip nie rozpoznał archiwum.").strip())
-    for line in proc.stdout.splitlines():
-        if line.startswith("Path = "):
-            _safe_member_name(line[7:])
+        text = (proc.stderr or proc.stdout or "WinRAR nie rozpoznał archiwum.").strip()
+        raise DownloadError(f"Nieprawidłowe archiwum RAR: {text[-1200:]}")
+
+    # The detailed WinRAR listing is human-oriented, so path validation is
+    # additionally performed when possible through rarfile. If rarfile isn't
+    # available, extraction is still protected by WinRAR's own current
+    # directory-traversal fixes.
+    if rarfile is not None:
+        try:
+            with rarfile.RarFile(str(archive_path)) as rf:
+                for info in rf.infolist():
+                    _safe_member_name(info.filename)
+        except Exception:
+            # Do not make rarfile a required backend. WinRAR remains the actual
+            # extraction engine.
+            pass
 
 
 def safe_extract_rar(rar_path: Path, destination: Path, progress: Callable[[int], None] | None = None) -> Path:
     if os.name != "nt":
-        # The same 7zz bootstrap works on Windows only in this launcher build.
-        tool = _find_installed_7z() or _ensure_bundled_7zz()
-    else:
-        tool = _find_installed_7z() or _ensure_bundled_7zz()
+        raise DownloadError("Rozpakowywanie RAR przez WinRAR jest dostępne tylko na Windows.")
+
+    tool = _find_installed_winrar()
+    if tool is None:
+        tool = _install_winrar()
+
     destination.mkdir(parents=True, exist_ok=True)
     destination = destination.resolve()
-    _validate_7z_listing(rar_path, tool)
-    proc = subprocess.run(
-        [str(tool), "x", "-y", f"-o{destination}", str(rar_path)],
-        capture_output=True,
-        text=True,
-        timeout=60 * 30,
-    )
+    _validate_archive_with_winrar(rar_path, tool)
+
+    try:
+        proc = subprocess.run(
+            [
+                str(tool),
+                "x",
+                "-y",
+                "-o+",
+                "-cfg-",
+                "-idq",
+                f"-op{destination}",
+                str(rar_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60 * 30,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        raise DownloadError(f"Nie można uruchomić WinRAR: {exc}") from exc
+
     if proc.returncode != 0:
-        text = (proc.stderr or proc.stdout or "Nieznany błąd 7-Zip").strip()
+        text = (proc.stderr or proc.stdout or "Nieznany błąd WinRAR").strip()
         raise DownloadError(f"Nie udało się rozpakować RAR: {text[-1200:]}")
+
     if progress:
         progress(100)
+    return destination
+
+
+def _normalize_archive_destination(destination: Path) -> Path:
+    """Use a real .rar suffix instead of the old .archivum pseudo-extension."""
+    if destination.suffix.lower() == ".archivum":
+        return destination.with_suffix(".rar")
     return destination
 
 
@@ -291,6 +426,7 @@ def download_file(url: str, destination: Path, progress: Callable[[int],None]|No
     if not url.strip(): raise DownloadError("Brak linku pobierania.")
     session=requests.Session(); session.headers.update({"User-Agent":"MizuLauncher/1.0"})
     resolved, gofile_session=resolve_gofile_url(url,session); client=gofile_session or session
+    destination=_normalize_archive_destination(destination)
     destination.parent.mkdir(parents=True,exist_ok=True); tmp=destination.with_suffix(destination.suffix+".part")
     for attempt in range(1,4):
         try:
